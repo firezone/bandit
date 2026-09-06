@@ -449,7 +449,9 @@ defmodule Bandit.HTTP2.Stream do
       {new_window, increment} =
         Bandit.HTTP2.FlowControl.compute_recv_window(stream.recv_window_size, byte_size(data))
 
-      if increment > 0 && !end_stream, do: do_send(stream, {:send_recv_window_update, increment})
+      # Do not grant more upload credit while discarding a body after an early response.
+      if increment > 0 && !end_stream && stream.state != :local_closed,
+        do: do_send(stream, {:send_recv_window_update, increment})
 
       bytes_remaining =
         case stream.bytes_remaining do
@@ -677,8 +679,12 @@ defmodule Bandit.HTTP2.Stream do
           validate_trailers!(headers, end_stream, stream)
           do_recv_end_stream(stream, end_stream)
 
-        {:bandit, {:data, data, true}} ->
-          do_recv_data(stream, data, true) |> do_recv_end_stream(true)
+        # Account for every queued DATA frame before validating END_STREAM.
+        {:bandit, {:data, data, end_stream}} ->
+          stream
+          |> do_recv_data(data, end_stream)
+          |> do_recv_end_stream(end_stream)
+          |> ensure_completed()
       after
         # RFC9113§8.1 - hint the client to stop sending data
         0 -> do_send(stream, {:send_rst_stream, Bandit.HTTP2.Errors.no_error()})
